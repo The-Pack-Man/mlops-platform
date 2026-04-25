@@ -1,0 +1,180 @@
+{
+  "id": null,
+  "uid": "mlops-model-health",
+  "title": "MLOps — Loan Model Health",
+  "tags": ["mlops", "loan", "model"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Predictions",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(loan_prediction_requests_total)",
+          "legendFormat": "Total"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Predicted Default Rate",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "loan_predicted_default_rate",
+          "legendFormat": "Default Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.3},
+              {"color": "red", "value": 0.5}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Current Model Version",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "loan_model_version",
+          "legendFormat": "Version"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "P99 Latency (ms)",
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(loan_prediction_latency_seconds_bucket[5m])) * 1000",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 100},
+              {"color": "red", "value": 500}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Request Rate (req/s)",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(loan_prediction_requests_total[1m])",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Prediction Latency Percentiles",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(loan_prediction_latency_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(loan_prediction_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(loan_prediction_latency_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s"}
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Default Probability Distribution (rolling)",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "loan_predicted_default_rate",
+          "legendFormat": "Default Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit"}
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Prediction Volume by Label",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(loan_default_probability_bucket{le=\"0.5\"}[5m])",
+          "legendFormat": "Predicted Non-Default (p<0.5)"
+        },
+        {
+          "expr": "rate(loan_default_probability_bucket{le=\"1.0\"}[5m]) - rate(loan_default_probability_bucket{le=\"0.5\"}[5m])",
+          "legendFormat": "Predicted Default (p>=0.5)"
+        }
+      ]
+    }
+  ]
+}

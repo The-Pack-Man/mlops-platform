@@ -1,0 +1,266 @@
+# ── shared env anchors ────────────────────────────────────────────────────────
+x-pg-env: &pg-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: mlops
+  POSTGRES_USER: mlops
+  POSTGRES_PASSWORD: mlops
+
+x-mlflow-env: &mlflow-env
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+
+x-redis-env: &redis-env
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+
+services:
+
+  # ── infrastructure ───────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mlops
+      POSTGRES_USER: mlops
+      POSTGRES_PASSWORD: mlops
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlops -d mlops"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ── base image ───────────────────────────────────────────────────────────────
+  base:
+    build: ./services/base
+    image: mlops-base:latest
+    command: ["true"]
+    networks:
+      - internal
+
+  # ── MLflow tracking server ───────────────────────────────────────────────────
+  mlflow:
+    build: ./services/mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    ports:
+      - "5000:5000"
+    networks:
+      - internal
+      - traefik_public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mlflow.rule=Host(`mlflow.localhost`)
+      - traefik.http.routers.mlflow.priority=100
+      - traefik.http.services.mlflow.loadbalancer.server.port=5000
+      - traefik.docker.network=traefik_public
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── data simulator ───────────────────────────────────────────────────────────
+  data_simulator:
+    build: ./services/data_simulator
+    depends_on:
+      base:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: [*pg-env, *redis-env]
+      SEED_ROWS: "500"
+      DRIFT_START_AFTER: "200"
+      INTERVAL_SECONDS: "2"
+    networks:
+      - internal
+    restart: unless-stopped
+
+  # ── initial training (one-shot) ───────────────────────────────────────────────
+  training:
+    build: ./services/training
+    depends_on:
+      base:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: [*pg-env, *mlflow-env]
+      MODEL_NAME: loan_default_model
+      MIN_ROWS: "200"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    networks:
+      - internal
+    restart: "no"
+
+  # ── serving (FastAPI inference API) ──────────────────────────────────────────
+  serving:
+    build: ./services/serving
+    depends_on:
+      base:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: [*pg-env, *mlflow-env, *redis-env]
+      MODEL_NAME: loan_default_model
+      MODEL_STAGE: Production
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+      - traefik_public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.serving.rule=Host(`loans.localhost`)
+      - traefik.http.routers.serving.priority=100
+      - traefik.http.services.serving.loadbalancer.server.port=8000
+      - traefik.docker.network=traefik_public
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── retraining service ────────────────────────────────────────────────────────
+  retraining:
+    build: ./services/retraining
+    depends_on:
+      base:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: [*pg-env, *mlflow-env]
+      MODEL_NAME: loan_default_model
+      SERVING_URL: http://serving:8000
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    ports:
+      - "8001:8001"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── monitoring / drift detection ──────────────────────────────────────────────
+  monitoring:
+    build: ./services/monitoring
+    depends_on:
+      base:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      retraining:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+      DRIFT_THRESHOLD: "0.15"
+      RETRAINING_TRIGGER_URL: http://retraining:8001/retrain
+      CHECK_INTERVAL_MIN: "2"
+      RETRAIN_COOLDOWN_MIN: "5"
+      REF_ROWS: "500"
+      CURRENT_ROWS: "300"
+    volumes:
+      - drift_reports:/reports
+    networks:
+      - internal
+    restart: unless-stopped
+
+  # ── prometheus ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - internal
+    restart: unless-stopped
+
+  # ── grafana ───────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ADMIN_PASSWORD: mlops
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - internal
+      - traefik_public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.grafana.rule=Host(`grafana.localhost`)
+      - traefik.http.routers.grafana.priority=100
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+      - traefik.docker.network=traefik_public
+    restart: unless-stopped
+
+# ── named volumes ─────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_artifacts:
+  drift_reports:
+  prometheus_data:
+  grafana_data:
+
+# ── networks ──────────────────────────────────────────────────────────────────
+networks:
+  internal:
+    driver: bridge
+  traefik_public:
+    external: true   # created by the shared Traefik stack
